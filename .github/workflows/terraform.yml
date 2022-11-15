@@ -1,0 +1,113 @@
+name: 'Terraform'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: "Select the environment"
+        required: true
+        options:
+          - Cluster1
+          - Cluster2
+
+      region:
+        type: choice
+        description: "Select the region"
+        required: true
+        options:
+          - eu-central-1 
+          - us-east-1 
+      ingress_name:
+        description: "Enter the service name"
+        required: true
+        default: ""
+      namespace:
+        description: "Enter the namespace name"
+        required: true
+        default: ""
+      tfapply:
+        description: 'Apply TF (false/true) - Default: false'
+        required: true
+        default: 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name:  ${{matrix.runner}} - ${{ matrix.environment }}
+    runs-on: [ '${{ matrix.runner }}']
+    strategy:
+      max-parallel: 1
+      matrix:
+         include:
+           - environment: test
+             runner: ubuntu-latest
+           
+    env:
+         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+         AWS_DEFAULT_REGION: ${{ github.event.inputs.region }}
+
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: get eks cluster context integration
+      id: update-eks-context-integration
+      run: |
+        aws eks update-kubeconfig --region ${{ github.event.inputs.region }} --name ${{ github.event.inputs.environment }} --role-arn arn:aws:iam::{{ AWS_Account_ID }}:role/{{ ROLE_NAME }}
+        kubectl config use-context arn:aws:eks:${{ github.event.inputs.region }}:${{ AWS_Account_ID }}:cluster/${{ github.event.inputs.environment }}
+
+    - name: Setup Input Variable file
+      id: Inputfile
+      run: |
+        echo "Check if Input file exist"
+        echo "environments/${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}/${{ github.event.inputs.ingress_name }}-${{ github.event.inputs.namespace }}-ingress.tfvars"
+        FILE="environments/${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}/${{ github.event.inputs.ingress_name }}-${{ github.event.inputs.namespace }}-ingress.tfvars"
+        if [ -f "$FILE" ]; then
+          echo "Terraform will use $FILE file as input variable"
+        else
+          echo "Input file $FILE NOT EXIST! Please check if you are using the correct Input Variable"
+          exit 1
+        fi
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: "1.3.0"
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform Init
+      id: init
+      run: |
+        rm -rf .terraform
+        terraform init -backend-config="region=us-east-1" -backend-config="bucket=ingress-backend-terraform-statefile" -backend-config="key=ingress/${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}/${{ github.event.inputs.ingress_name }}-${{ github.event.inputs.namespace }}/terraform.tfstate" -upgrade=true -no-color -input=false
+
+    # Generates an execution plan for Terraform
+    - name: Terraform Plan
+      id: plan
+      run: |  
+        terraform plan -var-file=environments/${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}/${{ github.event.inputs.ingress_name }}-${{ github.event.inputs.namespace }}-ingress.tfvars 
+
+    # Terraform apply
+    - name: Terraform Apply
+      id: apply
+      if: github.event.inputs.tfapply == 'true'
+      run: |
+        terraform apply -auto-approve -var-file=environments/${{ github.event.inputs.environment }}-${{ github.event.inputs.region }}/${{ github.event.inputs.ingress_name }}-${{ github.event.inputs.namespace }}-ingress.tfvars 
+
+    # Clean workspace
+    - name: cleanup
+      id: cleanup
+      run: |
+        rm -rf .terraform
+        rm -rf ~/.kube/config
